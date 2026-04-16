@@ -2,7 +2,10 @@
 import { useState, useEffect, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import Link from 'next/link';
-import { getPosts, ROUTES, JOURNEY_TYPES } from '../lib/store';
+// 1. Import your Supabase client
+import { supabase } from '../lib/supabase';
+// 2. Remove getPosts, keep your filter arrays
+import { ROUTES, JOURNEY_TYPES } from '../lib/store';
 import PostCard from '../components/PostCard';
 import styles from './home.module.css';
 
@@ -15,38 +18,72 @@ const TABS = [
 function HomeContent() {
   const searchParams = useSearchParams();
   const q = searchParams.get('q') || '';
+  
   const [posts,       setPosts]       = useState([]);
+  const [loading,     setLoading]     = useState(true); // Added loading state
   const [tab,         setTab]         = useState('new');
   const [routeFilter, setRouteFilter] = useState('');
   const [typeFilter,  setTypeFilter]  = useState('');
 
-  const load = () => {
-    let all = getPosts();
+  const load = async () => {
+    setLoading(true);
+
+    // Start the database query
+    let query = supabase.from('posts').select('*');
+
+    // Apply exact match filters
+    if (routeFilter) query = query.eq('route', routeFilter);
+    if (typeFilter)  query = query.eq('journeyType', typeFilter);
+
+    // Apply search filter (looking in title or excerpt)
     if (q) {
-      const qLow = q.toLowerCase();
-      all = all.filter(p =>
-        p.title.toLowerCase().includes(qLow) ||
-        p.excerpt?.toLowerCase().includes(qLow) ||
-        p.tags?.some(t => t.toLowerCase().includes(qLow)) ||
-        p.days?.some(d => d.location?.toLowerCase().includes(qLow))
-      );
+      query = query.or(`title.ilike.%${q}%,excerpt.ilike.%${q}%`);
     }
-    if (routeFilter) all = all.filter(p => p.route === routeFilter);
-    if (typeFilter)  all = all.filter(p => p.journeyType === typeFilter);
+
+    // Apply database sorting for 'new' and 'top'
     if (tab === 'new') {
-      all = all.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+      query = query.order('createdAt', { ascending: false });
     } else if (tab === 'top') {
-      all = all.sort((a, b) => b.upvotes - a.upvotes);
-    } else {
-      all = all.sort((a, b) => {
-        const age = (d) => (Date.now() - new Date(d).getTime()) / 86400000;
-        return (b.upvotes / (1 + age(b.createdAt))) - (a.upvotes / (1 + age(a.createdAt)));
-      });
+      query = query.order('upvotes', { ascending: false });
     }
-    setPosts(all);
+
+    // Execute the fetch
+    const { data, error } = await query;
+
+    if (error) {
+      console.error("Error fetching posts:", error);
+      setPosts([]);
+    } else {
+      let fetchedPosts = data || [];
+
+      // Apply the custom 'hot' math sorting in JavaScript
+      if (tab === 'hot') {
+        fetchedPosts = fetchedPosts.sort((a, b) => {
+          const age = (d) => (Date.now() - new Date(d).getTime()) / 86400000;
+          return (b.upvotes / (1 + age(b.createdAt))) - (a.upvotes / (1 + age(a.createdAt)));
+        });
+      }
+      
+      // If q exists, apply the deep array search (tags and days) in JS to match your original logic
+      if (q) {
+        const qLow = q.toLowerCase();
+        fetchedPosts = fetchedPosts.filter(p =>
+          p.title.toLowerCase().includes(qLow) ||
+          p.excerpt?.toLowerCase().includes(qLow) ||
+          p.tags?.some(t => t.toLowerCase().includes(qLow)) ||
+          p.days?.some(d => d.location?.toLowerCase().includes(qLow))
+        );
+      }
+
+      setPosts(fetchedPosts);
+    }
+    
+    setLoading(false);
   };
 
-  useEffect(() => { load(); }, [tab, routeFilter, typeFilter, q]);
+  useEffect(() => { 
+    load(); 
+  }, [tab, routeFilter, typeFilter, q]);
 
   return (
     <div className={styles.page}>
@@ -103,7 +140,13 @@ function HomeContent() {
               </select>
             </div>
 
-            {posts.length === 0 ? (
+            {/* Handle Loading State vs Empty State vs Populated Feed */}
+            {loading ? (
+              <div className={styles.empty}>
+                <p className={styles.emptyIcon}>⏳</p>
+                <h3>Loading journals...</h3>
+              </div>
+            ) : posts.length === 0 ? (
               <div className={styles.empty}>
                 <p className={styles.emptyIcon}>🗺️</p>
                 <h3>No journals found</h3>
@@ -157,7 +200,6 @@ function HomeContent() {
   );
 }
 
-// Suspense wrapper required by Next.js when using useSearchParams
 export default function HomePage() {
   return (
     <Suspense fallback={<div style={{ minHeight: '60vh' }} />}>
